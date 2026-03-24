@@ -15,6 +15,10 @@
   set_fact: php_enablerepo="remi,remi-php83"
   when: php_version == "8.3"
 
+- name: Enable remi repo for PHP 8.4.
+  set_fact: php_enablerepo="remi,remi-php84"
+  when: php_version == "8.4"
+
 # See: https://github.com/ansible/ansible/issues/64852
 - block:
 
@@ -23,12 +27,49 @@
         name: dnf-plugins-core
         state: present
 
-    - name: Enable crb and DNF module for CentOS 8+.
+    - name: Enable crb and DNF module for CentOS 8/9.
       shell: |
         dnf config-manager --set-enabled crb
         dnf module enable -y php:remi-{{ php_version }}
       register: dnf_module_enable
       changed_when: "'Nothing to do' not in dnf_module_enable.stdout"
+      when: ansible_facts.distribution_major_version | int < 10
+
+    - name: Check current PHP module stream (EL 10+).
+      ansible.builtin.shell: |
+        dnf module list --enabled php 2>/dev/null | grep -oP 'remi-\d+\.\d+' | head -1
+      register: php_current_stream
+      changed_when: false
+      failed_when: false
+      when: ansible_facts.distribution_major_version | int >= 10
+
+    - name: Enable crb for EL 10+.
+      ansible.builtin.shell: dnf config-manager --set-enabled crb
+      changed_when: false
+      when: ansible_facts.distribution_major_version | int >= 10
+
+    # Workaround: RPM bug #4030/#4045 — file triggers fire twice during module switch,
+    # causing pecl scriptlets to deadlock on PEAR Registry flock().
+    # Removing php-pecl-* before switch-to avoids concurrent trigger execution.
+    # The php role will reinstall needed PECL packages afterwards.
+    - name: Remove php-pecl packages before module switch to avoid scriptlet hang (EL 10+).
+      ansible.builtin.shell: |
+        rpm -qa 'php-pecl-*' | xargs --no-run-if-empty dnf remove -y
+      register: pecl_remove
+      changed_when: "'Removed' in pecl_remove.stdout"
+      failed_when: false
+      when:
+        - ansible_facts.distribution_major_version | int >= 10
+        - php_current_stream.stdout != ('remi-' + php_version)
+
+    - name: Switch PHP DNF module for EL 10+.
+      ansible.builtin.shell: |
+        dnf module switch-to php:remi-{{ php_version }}/common -y
+      register: dnf_module_switch
+      changed_when: "'Nothing to do' not in dnf_module_switch.stdout"
+      when:
+        - ansible_facts.distribution_major_version | int >= 10
+        - php_current_stream.stdout != ('remi-' + php_version)
 
   when:
     - ansible_facts.os_family == 'RedHat'
